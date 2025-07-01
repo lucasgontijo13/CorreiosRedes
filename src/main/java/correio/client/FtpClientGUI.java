@@ -11,7 +11,9 @@ import java.net.Socket;
 import java.nio.file.Files;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
-import java.util.Base64;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.nio.file.StandardCopyOption;
 
 public class FtpClientGUI extends JFrame {
     // --- UI Constants (sem alterações) ---
@@ -37,17 +39,19 @@ public class FtpClientGUI extends JFrame {
     private JTable shipmentTable;
     private DefaultTableModel tableModel;
     private JButton btnConnect, btnUpload, btnDownload, btnList, btnStatus, btnDisconnect;
-    private JLabel lblStatus; // Removido lblConnectionIcon
+    private JLabel lblStatus;
     private JProgressBar progressBar;
 
     // --- Connection ---
-    private Socket socket;
+    private Socket controlSocket;
     private BufferedReader in;
     private PrintWriter out;
     private boolean isConnected = false;
+    private static final Pattern PASV_PATTERN = Pattern.compile(".*\\((\\d+),(\\d+),(\\d+),(\\d+),(\\d+),(\\d+)\\).*");
+
 
     public FtpClientGUI() {
-        super("Cliente FTP Correios - v2.3 (No-Icon)");
+        super("Cliente FTP Correios - v3.0 (Real FTP)");
         setDefaultCloseOperation(EXIT_ON_CLOSE);
         setSize(1100, 750);
         setMinimumSize(new Dimension(850, 600));
@@ -63,7 +67,6 @@ public class FtpClientGUI extends JFrame {
         setupKeyboardShortcuts();
     }
 
-    // --- Métodos de construção da UI (com alterações) ---
     private void initUI() {
         getContentPane().setBackground(COLOR_BACKGROUND);
         setLayout(new BorderLayout(10, 10));
@@ -75,6 +78,9 @@ public class FtpClientGUI extends JFrame {
         updateConnectionState();
     }
 
+    // --- Métodos de UI (initUI, createHeaderPanel, etc.) não foram alterados ---
+    // ... (copie todos os seus métodos de criação de UI aqui, eles continuam os mesmos)
+    // Para economizar espaço, eles foram omitidos. Cole seus métodos originais aqui.
     private JPanel createHeaderPanel() {
         JPanel header = new JPanel(new BorderLayout(15, 0));
         header.setOpaque(false);
@@ -86,7 +92,6 @@ public class FtpClientGUI extends JFrame {
         connectionStatusPanel.setOpaque(false);
         lblStatus = new JLabel("Desconectado");
         lblStatus.setFont(FONT_MAIN);
-        // Removida a criação e adição do lblConnectionIcon
         connectionStatusPanel.add(lblStatus);
         header.add(titleLabel, BorderLayout.WEST);
         header.add(connectionStatusPanel, BorderLayout.EAST);
@@ -153,13 +158,13 @@ public class FtpClientGUI extends JFrame {
         setPlaceholder(txtId, "ID para Baixar/Status");
         panel.add(txtId, gbc);
         gbc.insets = new Insets(8, 0, 8, 0);
-        gbc.gridy = 2; btnUpload = createStyledButton("Enviar Arquivo", COLOR_PRIMARY);
+        gbc.gridy = 2; btnUpload = createStyledButton("Enviar Arquivo (STOR)", COLOR_PRIMARY);
         panel.add(btnUpload, gbc);
-        gbc.gridy = 3; btnDownload = createStyledButton("Baixar por ID", COLOR_PRIMARY);
+        gbc.gridy = 3; btnDownload = createStyledButton("Baixar por ID (RETR)", COLOR_PRIMARY);
         panel.add(btnDownload, gbc);
-        gbc.gridy = 4; btnStatus = createStyledButton("Status por ID", COLOR_PRIMARY);
+        gbc.gridy = 4; btnStatus = createStyledButton("Status por ID (STAT)", COLOR_PRIMARY);
         panel.add(btnStatus, gbc);
-        gbc.gridy = 5; btnList = createStyledButton("Listar Encomendas (F5)", COLOR_PRIMARY);
+        gbc.gridy = 5; btnList = createStyledButton("Listar Encomendas (LIST)", COLOR_PRIMARY);
         panel.add(btnList, gbc);
         btnUpload.addActionListener(e -> sendFile());
         btnDownload.addActionListener(e -> getFile());
@@ -172,24 +177,16 @@ public class FtpClientGUI extends JFrame {
         JPanel tablePanel = createTitledPanel("Encomendas no Servidor", createShipmentTablePanel());
         JPanel logPanel = createTitledPanel("Console de Atividades", createLogPanel());
         JSplitPane mainSplit = new JSplitPane(JSplitPane.VERTICAL_SPLIT, tablePanel, logPanel);
-
         mainSplit.setBorder(null);
         mainSplit.setDividerSize(8);
-        // A linha abaixo ajuda no comportamento de redimensionamento, vamos mantê-la.
-        mainSplit.setResizeWeight(0.3);
-
+        mainSplit.setResizeWeight(0.5);
         mainSplit.addComponentListener(new ComponentAdapter() {
             @Override
             public void componentResized(ComponentEvent e) {
-                // Remove o listener para que isso execute apenas uma vez.
                 mainSplit.removeComponentListener(this);
-                // Define a posição do divisor para 50% da altura total do painel.
-                // Para mais espaço no console, use um valor menor (ex: 0.4).
-                // Para menos espaço no console, use um valor maior (ex: 0.6).
-                mainSplit.setDividerLocation(0.7);
+                mainSplit.setDividerLocation(0.5);
             }
         });
-
         return mainSplit;
     }
 
@@ -325,7 +322,7 @@ public class FtpClientGUI extends JFrame {
         txtPort.setEnabled(!isConnected);
 
         if (isConnected) {
-            lblStatus.setText("Conectado a " + socket.getInetAddress().getHostAddress());
+            lblStatus.setText("Conectado a " + controlSocket.getInetAddress().getHostAddress());
             lblStatus.setForeground(COLOR_SUCCESS);
         } else {
             lblStatus.setText("Desconectado");
@@ -334,7 +331,6 @@ public class FtpClientGUI extends JFrame {
         }
     }
 
-    // NOVO: Desabilita os botões de ação durante uma operação de rede
     private void lockUIForOperation(String message) {
         showProgress(message);
         btnConnect.setEnabled(false);
@@ -345,35 +341,54 @@ public class FtpClientGUI extends JFrame {
         btnStatus.setEnabled(false);
     }
 
-    // NOVO: Restaura o estado dos botões após a operação
     private void unlockUI() {
         hideProgress("Pronto");
-        updateConnectionState(); // Restaura o estado correto dos botões
+        updateConnectionState();
     }
 
     private void connect() {
         new Thread(() -> {
-            // Garante que a atualização da UI ocorra na Event Dispatch Thread (EDT)
             SwingUtilities.invokeLater(() -> lockUIForOperation("Conectando..."));
             try {
-                socket = new Socket(txtHost.getText(), Integer.parseInt(txtPort.getText()));
-                in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-                out = new PrintWriter(socket.getOutputStream(), true);
-                String welcome = in.readLine();
-                log(welcome, LogLevel.RECV);
+                controlSocket = new Socket(txtHost.getText(), Integer.parseInt(txtPort.getText()));
+                in = new BufferedReader(new InputStreamReader(controlSocket.getInputStream()));
+                out = new PrintWriter(controlSocket.getOutputStream(), true);
+
+                // FTP "Handshake"
+                logResponse(); // 220
+                sendCommand("USER anonymous");
+                logResponse(); // 331
+                sendCommand("PASS guest@example.com");
+                logResponse(); // 230
+                sendCommand("TYPE I");
+                logResponse(); // 200
+
                 isConnected = true;
                 SwingUtilities.invokeLater(() -> {
                     log("Conexão estabelecida com sucesso.", LogLevel.SUCCESS);
-                    listFiles(); // Chama listFiles, que já tem seu próprio lock/unlock
+                    listFiles(); // Atualiza a lista inicial
                 });
             } catch (Exception ex) {
                 log("Erro de conexão: " + ex.getMessage(), LogLevel.ERROR);
                 isConnected = false;
-            } finally {
-                // Desbloqueia a UI no final, independentemente de sucesso ou falha
                 if(!isConnected) SwingUtilities.invokeLater(this::unlockUI);
             }
         }).start();
+    }
+
+    // Novo método para abrir a conexão de dados em modo passivo
+    private Socket openDataConnection() throws IOException {
+        sendCommand("PASV");
+        String response = logResponse(); // 227
+        Matcher matcher = PASV_PATTERN.matcher(response);
+        if (!matcher.matches()) {
+            throw new IOException("Resposta PASV invalida: " + response);
+        }
+        String ip = String.format("%s.%s.%s.%s", matcher.group(1), matcher.group(2), matcher.group(3), matcher.group(4));
+        int port = Integer.parseInt(matcher.group(5)) * 256 + Integer.parseInt(matcher.group(6));
+
+        log("Abrindo conexão de dados para " + ip + ":" + port, LogLevel.INFO);
+        return new Socket(ip, port);
     }
 
     private void disconnect() {
@@ -381,15 +396,16 @@ public class FtpClientGUI extends JFrame {
         new Thread(() -> {
             SwingUtilities.invokeLater(() -> lockUIForOperation("Desconectando..."));
             try {
-                if (out != null) out.println("QUIT");
-                if (socket != null && !socket.isClosed()) socket.close();
+                if (out != null) sendCommand("QUIT");
+                logResponse(); // 221
+                if (controlSocket != null && !controlSocket.isClosed()) controlSocket.close();
             } catch (IOException ex) {
                 log("Erro ao tentar desconectar: " + ex.getMessage(), LogLevel.ERROR);
             } finally {
                 isConnected = false;
                 SwingUtilities.invokeLater(() -> {
                     log("Desconectado do servidor.", LogLevel.WARN);
-                    unlockUI(); // Desbloqueia a UI após desconectar
+                    unlockUI();
                 });
             }
         }).start();
@@ -401,29 +417,22 @@ public class FtpClientGUI extends JFrame {
             File file = chooser.getSelectedFile();
             new Thread(() -> {
                 SwingUtilities.invokeLater(() -> lockUIForOperation("Enviando: " + file.getName()));
-                try {
-                    String command = "PUT " + file.getName();
-                    out.println(command);
-                    log(command, LogLevel.SENT);
+                try (Socket dataSocket = openDataConnection()) { // Abre canal de dados
 
-                    String resp = in.readLine();
-                    log(resp, resp.startsWith("150") ? LogLevel.RECV : LogLevel.ERROR);
+                    sendCommand("STOR " + file.getName()); // Envia comando no canal de controle
+                    logResponse(); // 150
 
-                    if (resp.startsWith("150")) {
-                        byte[] fileBytes = Files.readAllBytes(file.toPath());
-                        String encodedString = Base64.getEncoder().encodeToString(fileBytes);
-                        out.println(encodedString);
-                        out.println("EOF");
-                        out.flush();
-
-                        String done = in.readLine();
-                        log(done, LogLevel.SUCCESS);
-                        listFiles(); // Já tem lock/unlock
+                    // Envia dados brutos pelo canal de dados
+                    try (OutputStream dataOut = dataSocket.getOutputStream()) {
+                        Files.copy(file.toPath(), dataOut);
                     }
+
+                    logResponse(); // 226
+                    listFiles(); // Atualiza a tabela
+
                 } catch (IOException e) {
                     log("Erro ao enviar arquivo: " + e.getMessage(), LogLevel.ERROR);
-                } finally {
-                    if(!isConnected) SwingUtilities.invokeLater(this::unlockUI);
+                    SwingUtilities.invokeLater(this::unlockUI);
                 }
             }).start();
         }
@@ -448,28 +457,22 @@ public class FtpClientGUI extends JFrame {
             File selectedFile = chooser.getSelectedFile();
             new Thread(() -> {
                 SwingUtilities.invokeLater(() -> lockUIForOperation("Baixando ID: " + id));
-                try {
-                    String command = "GET " + id;
-                    out.println(command);
-                    log(command, LogLevel.SENT);
+                try (Socket dataSocket = openDataConnection()){
 
-                    String line = in.readLine();
-                    log(line, line.startsWith("150") ? LogLevel.RECV : LogLevel.ERROR);
+                    sendCommand("RETR " + id);
+                    logResponse(); // 150
 
-                    if (line.startsWith("150")) {
-                        String base64Data = in.readLine();
-                        in.readLine(); // Consome EOF
-                        byte[] decodedBytes = Base64.getDecoder().decode(base64Data);
-                        Files.write(selectedFile.toPath(), decodedBytes);
-
-                        String finalResp = in.readLine();
-                        log(finalResp + " - Salvo em: " + selectedFile.getAbsolutePath(), LogLevel.SUCCESS);
-                        listFiles(); // Já tem lock/unlock
+                    // Recebe dados brutos pelo canal de dados
+                    try(InputStream dataIn = dataSocket.getInputStream()) {
+                        Files.copy(dataIn, selectedFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
                     }
+
+                    logResponse(); // 226
+                    listFiles();
+
                 } catch (IOException e) {
                     log("Erro ao baixar arquivo: " + e.getMessage(), LogLevel.ERROR);
-                } finally {
-                    if(!isConnected) SwingUtilities.invokeLater(this::unlockUI);
+                    SwingUtilities.invokeLater(this::unlockUI);
                 }
             }).start();
         }
@@ -478,23 +481,26 @@ public class FtpClientGUI extends JFrame {
     private void listFiles() {
         new Thread(() -> {
             SwingUtilities.invokeLater(() -> lockUIForOperation("Listando encomendas..."));
-            try {
-                out.println("LIST");
-                log("LIST", LogLevel.SENT);
-                String line = in.readLine();
-                log(line, LogLevel.RECV);
+            try (Socket dataSocket = openDataConnection()){
+
+                sendCommand("LIST");
+                logResponse(); // 150
+
                 SwingUtilities.invokeLater(() -> tableModel.setRowCount(0));
-                while (!(line = in.readLine()).equals("END")) {
-                    if (line.startsWith("EMPTY")) {
-                        log("Nenhuma encomenda registrada no servidor.", LogLevel.INFO);
-                        continue;
-                    }
-                    String[] parts = line.split("\\|");
-                    if (parts.length == 4) {
-                        final Object[] rowData = { parts[0].trim(), parts[1].trim(), parts[2].trim(), parts[3].trim() };
-                        SwingUtilities.invokeLater(() -> tableModel.addRow(rowData));
+
+                // Lê a listagem pelo canal de dados
+                try(BufferedReader dataIn = new BufferedReader(new InputStreamReader(dataSocket.getInputStream()))) {
+                    String line;
+                    while((line = dataIn.readLine()) != null) {
+                        String[] parts = line.split("\\|");
+                        if(parts.length == 4){
+                            final Object[] rowData = { parts[0].trim(), parts[1].trim(), parts[2].trim(), parts[3].trim() };
+                            SwingUtilities.invokeLater(() -> tableModel.addRow(rowData));
+                        }
                     }
                 }
+
+                logResponse(); // 226
                 log("Lista de encomendas atualizada.", LogLevel.SUCCESS);
             } catch (IOException e) {
                 log("Erro ao listar encomendas: " + e.getMessage(), LogLevel.ERROR);
@@ -513,17 +519,32 @@ public class FtpClientGUI extends JFrame {
         new Thread(() -> {
             SwingUtilities.invokeLater(() -> lockUIForOperation("Verificando status do ID: " + id));
             try {
-                String command = "STATUS " + id;
-                out.println(command);
-                log(command, LogLevel.SENT);
-                String response = in.readLine();
-                log(response, LogLevel.RECV);
+                sendCommand("STAT " + id);
+                // Respostas a STAT podem ser multiline
+                String line;
+                while((line = logResponse()).startsWith("211-")) {
+                    // Apenas loga, já que a ultima linha 211 será logada
+                }
             } catch (IOException e) {
                 log("Erro ao verificar status: " + e.getMessage(), LogLevel.ERROR);
             } finally {
                 SwingUtilities.invokeLater(this::unlockUI);
             }
         }).start();
+    }
+
+    private void sendCommand(String command) {
+        log(command, LogLevel.SENT);
+        out.println(command);
+    }
+
+    private String logResponse() throws IOException {
+        String response = in.readLine();
+        if(response == null) throw new IOException("O servidor fechou a conexão inesperadamente.");
+
+        LogLevel level = response.startsWith("5") || response.startsWith("4") ? LogLevel.ERROR : LogLevel.RECV;
+        log(response, level);
+        return response;
     }
 
     // --- Métodos de log e progresso (sem alterações) ---
@@ -578,8 +599,6 @@ public class FtpClientGUI extends JFrame {
         getRootPane().getActionMap().put("refreshList", new AbstractAction() {
             @Override
             public void actionPerformed(ActionEvent e) {
-                // A verificação de 'isEnabled' previne o acionamento via atalho
-                // enquanto uma operação já está em andamento.
                 if (isConnected && btnList.isEnabled()) {
                     listFiles();
                 }
