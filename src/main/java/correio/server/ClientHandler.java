@@ -96,7 +96,7 @@ public class ClientHandler implements Runnable {
 		out.println("227 Entrando em Modo Passivo (" + ipStr + "," + portStr + ").");
 	}
 
-	// Antigo handlePut, agora é handleStor (Store)
+	// handleStor (Store)
 	private void handleStor(String filename, PrintWriter controlOut) throws IOException {
 		controlOut.println("150 Ok para enviar dados.");
 
@@ -129,7 +129,7 @@ public class ClientHandler implements Runnable {
 		}
 	}
 
-	// Antigo handleGet, agora é handleRetr (Retrieve)
+	// handleRetr (Retrieve)
 	private void handleRetr(String shipmentId, PrintWriter controlOut) throws IOException {
 		ShipmentInfo info = tracking.get(shipmentId);
 		if (info == null) {
